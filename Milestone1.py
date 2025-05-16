@@ -5,281 +5,249 @@ import os
 import math
 
 # ==============================================
-#       HELPER FUNCTION: Display Images
+# TUNING CONSTANTS FOR DYNAMIC MORPHOLOGY
+THIN_EDGE_MAX    = 4
+MEDIUM_EDGE_MAX  = 6
+# thin edges
+K_OPEN_THIN      = 3
+IT_OPEN_THIN     = 1
+K_CLOSE_THIN     = 5
+IT_CLOSE_THIN    = 1
+# medium edges
+K_OPEN_MEDIUM    = 5
+IT_OPEN_MEDIUM   = 1
+K_CLOSE_MEDIUM   = 9
+IT_CLOSE_MEDIUM  = 2
+# thick edges
+K_OPEN_THICK     = 5
+IT_OPEN_THICK    = 1
+K_CLOSE_THICK    = 13
+IT_CLOSE_THICK   = 2
+
+
 # ==============================================
-# (Keep the display_images function from previous responses)
-def display_images(image_list, titles, figure_title="Image Processing Stages"):
-    """Displays a list of images using matplotlib in a grid layout."""
-    if not image_list: return
-    num_images = len(image_list)
-    if num_images == 0: return
-    cols = math.ceil(math.sqrt(num_images))
-    rows = math.ceil(num_images / cols)
-    plt.figure(figsize=(cols * 4, rows * 4.5))
-    plt.suptitle(figure_title, fontsize=16)
-    for i, (image, title) in enumerate(zip(image_list, titles)):
-        plt.subplot(rows, cols, i + 1)
-        if image is None:
-            plt.title(f"{title}\n(Error)")
-            plt.imshow(np.zeros((50, 50), dtype=np.uint8), cmap='gray', vmin=0, vmax=255)
-        elif len(image.shape) == 3:
-            plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+# DISPLAY A GRID OF IMAGES (for debugging)
+def display_images(image_list, titles, figure_title="Stages"):
+    if not image_list:
+        return
+    n    = len(image_list)
+    cols = math.ceil(math.sqrt(n))
+    rows = math.ceil(n/cols)
+    plt.figure(figsize=(cols*3, rows*3))
+    plt.suptitle(figure_title, fontsize=14)
+    for i, (img, ttl) in enumerate(zip(image_list, titles)):
+        plt.subplot(rows, cols, i+1)
+        if img is None:
+            plt.imshow(np.zeros((50,50),np.uint8), cmap='gray')
+        elif img.ndim==3:
+            plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         else:
-            plt.imshow(image, cmap='gray')
-        plt.title(title)
-        plt.xticks([])
-        plt.yticks([])
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            plt.imshow(img, cmap='gray')
+        plt.title(ttl, fontsize=9)
+        plt.xticks([]); plt.yticks([])
+    plt.tight_layout(rect=[0,0.02,1,0.94])
     plt.show()
 
+
 # ==============================================
-#       STEP ONE FUNCTION (Using Sobel + Thresholding)
+# ROBUST MEDIAN EDGE-THICKNESS ESTIMATE
+def estimate_edge_thickness(binary_edges):
+    if binary_edges is None or cv2.countNonZero(binary_edges)==0:
+        return 1
+    try:
+        inv  = cv2.bitwise_not(binary_edges)
+        dist = cv2.distanceTransform(inv, cv2.DIST_L2, 3)
+        vals = dist[binary_edges>0]
+        if vals.size==0:
+            vals = dist[dist>0]
+        if vals.size==0:
+            return 1
+        thickness = (vals*2).astype(int)
+        lo, hi = np.percentile(thickness, [5,95])
+        inliers = thickness[(thickness>=lo)&(thickness<=hi)]
+        med = int(np.median(inliers)) if inliers.size else int(np.median(thickness))
+        return max(1, med)
+    except:
+        return 1
+
+
 # ==============================================
+# DESKEW VIA CANNY + HOUGH LINES
+def get_rotation_angle_and_deskew(
+    gray_image,
+    angle_tolerance=25,
+    canny_thresh1=50, canny_thresh2=150,
+    hough_thresh=40,
+    min_line_len=40, max_line_gap=10
+):
+    steps, titles = [], []
+    h, w = gray_image.shape[:2]
+
+    # 1) small blur → Canny edges
+    blur3 = cv2.GaussianBlur(gray_image, (3,3), 0)
+    steps.append(blur3.copy()); titles.append("Blur for Canny (3×3)")
+    edges = cv2.Canny(blur3, canny_thresh1, canny_thresh2)
+    steps.append(edges.copy()); titles.append(f"Canny Edges ({canny_thresh1}-{canny_thresh2})")
+
+    # 2) HoughLinesP visualization
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1, theta=np.pi/180,
+        threshold=hough_thresh,
+        minLineLength=min_line_len,
+        maxLineGap=max_line_gap
+    )
+    viz = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
+    angles = []
+    if lines is not None:
+        for l in lines:
+            x1,y1,x2,y2 = l[0]
+            cv2.line(viz, (x1,y1), (x2,y2), (0,0,255), 1)
+            dx, dy = x2-x1, y2-y1
+            if dx==0: continue
+            ang = math.degrees(math.atan2(dy,dx))
+            if abs(ang)>(180-angle_tolerance):
+                ang -= math.copysign(180, ang)
+            if abs(ang)<=angle_tolerance:
+                angles.append(ang)
+                cv2.line(viz, (x1,y1), (x2,y2), (0,255,0), 1)
+    steps.append(viz.copy()); titles.append("Hough Lines Viz")
+
+    # 3) rotate if enough consistent lines
+    rotated = gray_image.copy()
+    if angles:
+        avg_ang = float(np.mean(angles))
+        if abs(avg_ang)>0.5:
+            M = cv2.getRotationMatrix2D((w//2, h//2), avg_ang, 1.0)
+            rotated = cv2.warpAffine(
+                gray_image, M, (w,h),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REPLICATE
+            )
+
+    return rotated, angles, steps, titles
+
+
+# ==============================================
+# STEP ONE: FULL PIPELINE (largest CC as final mask)
 def stepOne(image_path):
-    """
-    Performs Step 1: Preprocessing using Sobel edge detection followed by thresholding.
-
-    Args:
-        image_path (str): Path to the input image.
-
-    Returns:
-        tuple: (final_port_mask, intermediate_steps, titles)
-    """
-    print(f"--- Running Step 1 for: {os.path.basename(image_path)} ---")
+    print(f"\n--- Processing: {os.path.basename(image_path)} ---")
     intermediate_steps = []
     titles = []
 
-    # 1. Load Image
-    original_image = cv2.imread(image_path)
-    if original_image is None:
-        print(f"Error: Could not read image {image_path}")
+    # 1) load & original
+    img_bgr = cv2.imread(image_path)
+    if img_bgr is None:
         return None, intermediate_steps, titles
-    intermediate_steps.append(original_image.copy())
-    titles.append("Original")
+    intermediate_steps.append(img_bgr.copy()); titles.append("Original")
 
-    # 2. Grayscale
-    gray_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
-    intermediate_steps.append(gray_image.copy())
-    titles.append("Grayscale")
+    # 2) grayscale
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    intermediate_steps.append(gray.copy()); titles.append("Grayscale")
 
-    # 3. Blurring (Essential before Sobel to reduce noise sensitivity)
-    # Use moderate blur
-    blur_ksize = 7 # Must be odd
-    blurred_image = cv2.GaussianBlur(gray_image, (blur_ksize, blur_ksize), 0)
-    # blurred_image = cv2.medianBlur(gray_image, blur_ksize) # Or try median
-    intermediate_steps.append(blurred_image.copy())
-    titles.append(f"Blurred (k={blur_ksize})")
+    # 3) deskew
+    gray_rot, angles, ds, dtitles = get_rotation_angle_and_deskew(
+        gray,
+        angle_tolerance=25,
+        canny_thresh1=50, canny_thresh2=150,
+        hough_thresh=40,
+        min_line_len=30, max_line_gap=10
+    )
+    intermediate_steps.extend(ds); titles.extend(dtitles)
+    intermediate_steps.append(gray_rot.copy()); titles.append("Rotated Gray")
 
-    # --- 4. Sobel Edge Detection ---
-    # Calculate gradients - use 64F for higher precision, then convert back
-    grad_x = cv2.Sobel(blurred_image, cv2.CV_64F, 1, 0, ksize=9) # ksize=3 or 5
-    grad_y = cv2.Sobel(blurred_image, cv2.CV_64F, 0, 1, ksize=9)
+    # 4) blur rotated
+    blur5 = cv2.GaussianBlur(gray_rot, (5,5), 0)
+    intermediate_steps.append(blur5.copy()); titles.append("Blurred Rotated (5×5)")
 
-    # Calculate gradient magnitude
-    grad_magnitude = cv2.magnitude(grad_x, grad_y)
+    # 5) Canny edges
+    canny_low, canny_high = 40, 100
+    edges_canny = cv2.Canny(blur5, canny_low, canny_high)
+    intermediate_steps.append(edges_canny.copy())
+    titles.append(f"Canny Edges ({canny_low}-{canny_high})")
 
-    # Scale magnitude to 0-255 range for visualization and thresholding
-    # Using power scaling (e.g., sqrt) can sometimes enhance weaker edges visually
-    # grad_magnitude_scaled = cv2.normalize(grad_magnitude**0.5, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-    # Linear scaling:
-    grad_magnitude_scaled = cv2.normalize(grad_magnitude, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+    # 6) dilate
+    dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
+    thick_edges = cv2.dilate(edges_canny, dilate_kernel, iterations=1)
+    intermediate_steps.append(thick_edges.copy()); titles.append("Dilated Edges (3×3)")
 
-    intermediate_steps.append(grad_magnitude_scaled.copy())
-    titles.append("Sobel Magnitude")
-    # --- End Sobel ---
-
-    # --- 5. Thresholding the SOBEL MAGNITUDE ---
-    # Use Otsu to find a threshold for the edge strengths, or set a fixed one
-    threshold_value, binary_edges = cv2.threshold(grad_magnitude_scaled, 0, 255,
-                                                  cv2.THRESH_BINARY + int(abs(cv2.THRESH_OTSU * 1.1)))
-    # Alternatively, try a fixed threshold (e.g., good edge strength value):
-    # T_fixed = 50 # TUNE this value
-    # _, binary_edges = cv2.threshold(grad_magnitude_scaled, T_fixed, 255, cv2.THRESH_BINARY)
-    # threshold_value = T_fixed # For title
-
-    intermediate_steps.append(binary_edges.copy())
-    titles.append(f"Binary Edges (Otsu Thresh: {threshold_value:.0f})")
-    # --- End Thresholding ---
-
-
-    # --- 6. Morphological Cleanup (CRITICAL for edge maps) ---
-    # We need to CONNECT the edges and FILL the shape. Closing is key.
-    # Use larger kernels and more iterations than before.
-    # Dilation first can help connect nearby edges before closing
-    dilate_ksize = 3
-    dilate_iter = 1
-    kernel_dilate = np.ones((dilate_ksize, dilate_ksize), np.uint8)
-    dilated_edges = cv2.dilate(binary_edges, kernel_dilate, iterations=dilate_iter)
-    intermediate_steps.append(dilated_edges.copy())
-    titles.append(f"Dilated Edges (k={dilate_ksize}, i={dilate_iter})")
-
-
-    close_ksize = 7 # TUNE: Larger kernel needed to close gaps
-    close_iter = 3 # TUNE: More iterations often needed
-    kernel_close = np.ones((close_ksize, close_ksize), np.uint8)
-    # Using closing on the DILATED edges
-    closed_binary = cv2.morphologyEx(dilated_edges, cv2.MORPH_CLOSE, kernel_close, iterations=close_iter)
-    intermediate_steps.append(closed_binary.copy())
-    titles.append(f"Closed Edges (k={close_ksize}, i={close_iter})")
-    # --- End Cleanup ---
-
-    # 7. Contour Filtering (Applied to the filled shape)
-    contours, hierarchy = cv2.findContours(closed_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    final_port_mask = np.zeros_like(closed_binary)
-
-    if not contours:
-        print("Warning: No contours found after morphology.")
-        intermediate_steps.append(final_port_mask)
-        titles.append("Final Port Mask (Error)")
-        return final_port_mask, intermediate_steps, titles
-
-    # --- Contour Filtering Parameters (TUNING NEEDED) ---
-    min_area = 200
-    max_area = closed_binary.shape[0] * closed_binary.shape[1] * 0.8 # Allow larger area now
-    min_aspect_ratio = 1.1
-    max_aspect_ratio = 6.0
-    # --- End Parameters ---
-
-    potential_contours = []
-    contour_viz = cv2.cvtColor(closed_binary, cv2.COLOR_GRAY2BGR)
-
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        if min_area < area < max_area:
-            try:
-                rect = cv2.minAreaRect(contour)
-                (x, y), (width, height), angle = rect
-                if width < 1 or height < 1: continue
-                aspect_ratio = max(width / height, height / width)
-                if min_aspect_ratio < aspect_ratio < max_aspect_ratio:
-                     potential_contours.append(contour)
-                     cv2.drawContours(contour_viz, [contour], -1, (0, 255, 0), 1) # Green
-                else:
-                     cv2.drawContours(contour_viz, [contour], -1, (255, 0, 0), 1) # Blue
-            except Exception as e:
-                cv2.drawContours(contour_viz, [contour], -1, (0, 0, 128), 1) # Brown
-                continue
-        else:
-             cv2.drawContours(contour_viz, [contour], -1, (0, 0, 255), 1) # Red
-
-    intermediate_steps.append(contour_viz)
-    titles.append("Contour Filtering Viz")
-
-    if not potential_contours:
-        print("Warning: No contours passed filtering.")
-        intermediate_steps.append(final_port_mask)
-        titles.append("Final Port Mask (Error)")
-        return final_port_mask, intermediate_steps, titles
-
-    best_contour = max(potential_contours, key=cv2.contourArea)
-
-    # 8. Create Final Mask
-    cv2.drawContours(final_port_mask, [best_contour], -1, 255, thickness=cv2.FILLED)
-    intermediate_steps.append(final_port_mask)
-    titles.append("Final Port Mask")
-
-    print("--- Step 1 Finished ---")
-    return final_port_mask, intermediate_steps, titles
-# ==============================================
-#       MILESTONE 2: CLASSIFICATION FUNCTIONS
-# ==============================================
-
-def classify_usb(final_mask):
-    """Classifies USB type using geometric features from the mask."""
-    contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return "Unknown (No contours)"
-    
-    contour = max(contours, key=cv2.contourArea)
-    
-    # Feature Extraction
-    rect = cv2.minAreaRect(contour)
-    (_, _), (width, height), _ = rect
-    aspect_ratio = max(width, height) / min(width, height)
-    
-    hull = cv2.convexHull(contour)
-    solidity = cv2.contourArea(contour) / cv2.contourArea(hull)
-    
-    # Classification Rules
-    if 3.0 < aspect_ratio < 4.0 and solidity > 0.9:
-        return "USB-C (Oval)"
-    elif 2.0 < aspect_ratio < 3.0:
-        return "USB-A (Rectangle)"
-    elif 1.0 < aspect_ratio < 2.0:
-        return "Micro-USB (Trapezoid)"
+    # 7) morphological cleanup
+    median_thick = estimate_edge_thickness(thick_edges)
+    print(f" → median edge thickness ≃ {median_thick}")
+    if median_thick<=THIN_EDGE_MAX:
+        ko,io = K_OPEN_THIN, IT_OPEN_THIN
+        kc,ic = K_CLOSE_THIN, IT_CLOSE_THIN
+    elif median_thick<=MEDIUM_EDGE_MAX:
+        ko,io = K_OPEN_MEDIUM, IT_OPEN_MEDIUM
+        kc,ic = K_CLOSE_MEDIUM, IT_CLOSE_MEDIUM
     else:
-        return f"Unknown (AR={aspect_ratio:.1f})"
+        ko,io = K_OPEN_THICK, IT_OPEN_THICK
+        kc,ic = K_CLOSE_THICK, IT_CLOSE_THICK
 
-def add_classification_result(image, usb_type):
-    """Adds classification text to the image."""
-    result_img = image.copy()
-    cv2.putText(result_img, f"Type: {usb_type}", (10, 30), 
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-    return result_img
+    opened = cv2.morphologyEx(
+        thick_edges,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (ko,ko)),
+        iterations=io
+    )
+    intermediate_steps.append(opened.copy()); titles.append(f"Opened (k={ko},i={io})")
+
+    closed = cv2.morphologyEx(
+        opened,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (kc,kc)),
+        iterations=ic
+    )
+    intermediate_steps.append(closed.copy()); titles.append(f"Closed (k={kc},i={ic})")
+
+    # 8) extract largest connected component
+    final_mask = np.zeros_like(closed)
+    n_lbl, labels, stats, _ = cv2.connectedComponentsWithStats(
+        closed, connectivity=8, ltype=cv2.CV_32S
+    )
+    if n_lbl > 1:
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        big   = np.argmax(areas) + 1
+        comp  = (labels == big).astype(np.uint8) * 255
+        final_mask = comp
+        intermediate_steps.append(comp.copy()); titles.append(f"Largest CC ({big})")
+    else:
+        # if only background or 1 label, leave empty mask
+        intermediate_steps.append(final_mask.copy()); titles.append("Largest CC (none)")
+
+    return final_mask, intermediate_steps, titles
 
 
 # ==============================================
-#       MAIN EXECUTION (Example Usage)
-# ==============================================
-# (Keep the main execution block from previous responses, it should work with this stepOne)
+# MAIN: Process & Save the largest CC into output_image
 if __name__ == "__main__":
-    folder_path = input("Enter the path to the image folder (or press Enter to use test path): ")
-    print(f"[DEBUG] Input received: '{folder_path}'")
+    base_dir    = os.path.dirname(__file__) if "__file__" in globals() else os.getcwd()
+    images_dir  = os.path.join(base_dir, "Images")
+    output_dir  = os.path.join(base_dir, "output_image")
+    os.makedirs(output_dir, exist_ok=True)
 
-    image_files_to_process = []
+    if not os.path.isdir(images_dir):
+        print(f"ERROR: '{images_dir}' not found.")
+        exit(1)
 
-    if not folder_path:
-        image_path_to_test = 'test_usb.jpg' # <---- ENSURE THIS FILE EXISTS or PROVIDE FULL PATH
-        print(f"[DEBUG] -> No folder entered. Checking for default test image: {image_path_to_test}")
-        if not os.path.isfile(image_path_to_test):
-            print(f"!! ERROR: Default test image '{image_path_to_test}' not found or is not a file.")
-            exit()
-        print(f"[DEBUG] -> Default test file exists. Proceeding with this file.")
-        image_files_to_process = [image_path_to_test]
+    valid_exts = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
+    files = sorted([
+        os.path.join(images_dir, f)
+        for f in os.listdir(images_dir)
+        if f.lower().endswith(valid_exts)
+    ])
+    print(f"Found {len(files)} images in '{images_dir}'.")
 
-    elif not os.path.isdir(folder_path):
-        print(f"!! ERROR: Entered path '{folder_path}' is not a valid directory.")
-        exit()
+    for fp in files:
+        mask, seq, seq_titles = stepOne(fp)
+        display_images(seq, seq_titles, f"Step 1: {os.path.basename(fp)}")
 
-    else:
-        print(f"[DEBUG] -> Entered path is a directory. Listing images in: {folder_path}")
-        valid_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff')
-        try:
-            all_files = os.listdir(folder_path)
-            print(f"[DEBUG] -> Found {len(all_files)} total items in folder.")
-            image_files_to_process = sorted([
-                os.path.join(folder_path, f)
-                for f in all_files
-                if os.path.isfile(os.path.join(folder_path, f)) and f.lower().endswith(valid_extensions)
-            ])
-            print(f"[DEBUG] -> Found {len(image_files_to_process)} valid image files to process.")
-        except Exception as e:
-             print(f"!! ERROR listing files in directory '{folder_path}': {e}")
-             exit()
+        if mask is not None:
+            # save the largest CC mask
+            name, _  = os.path.splitext(os.path.basename(fp))
+            out_name = f"{name}_largestCC.png"
+            out_path = os.path.join(output_dir, out_name)
+            cv2.imwrite(out_path, mask)
+            print(f" → Saved largest CC mask to: {out_path}")
 
-        if not image_files_to_process:
-             print(f"!! WARNING: No valid image files (with extensions {valid_extensions}) found in folder: {folder_path}")
-             exit()
-
-    print(f"\n>>> Starting processing for {len(image_files_to_process)} image(s)...")
-    for img_path in image_files_to_process:
-        print(f"\n--- Calling stepOne for: {img_path} ---")
-        final_mask, steps, step_titles = stepOne(img_path)
-        usb_type = classify_usb(final_mask)
-        print(f"Classification Result: {usb_type}")
-        
-        
-        
-
-        display_images(steps, step_titles, f"Step 1 Pipeline: {os.path.basename(img_path)}")
-
-        if final_mask is not None:
-            if cv2.countNonZero(final_mask) > 0:
-                print(f"-> Successfully generated NON-EMPTY mask for {os.path.basename(img_path)}")
-            else:
-                print(f"-> Successfully generated EMPTY mask for {os.path.basename(img_path)} (Contour filtering likely failed)")
-        else:
-            print(f"-> Failed to generate mask for {os.path.basename(img_path)} (Error in stepOne)")
-        print("-" * 50)
-
-    print("\n>>> Finished processing all images.")
+        print("-" * 60)
