@@ -8,17 +8,17 @@ import math
 #       TUNING CONSTANTS FOR DYNAMIC MORPHOLOGY
 # ==============================================
 # Thickness thresholds (adjust based on typical edge thickness in pixels)
-THIN_EDGE_MAX = 2
-MEDIUM_EDGE_MAX = 4
+THIN_EDGE_MAX = 4
+MEDIUM_EDGE_MAX = 6
 
 # Parameters for THIN edges
-K_OPEN_THIN = 3   # Small kernel to remove noise but keep thin lines (must be odd)
+K_OPEN_THIN = 3 # Small kernel to remove noise but keep thin lines (must be odd)
 IT_OPEN_THIN = 1
-K_CLOSE_THIN = 5  # Moderate kernel to close small gaps (must be odd)
+K_CLOSE_THIN = 5 # Moderate kernel to close small gaps (must be odd)
 IT_CLOSE_THIN = 1
 
 # Parameters for MEDIUM edges
-K_OPEN_MEDIUM = 3 # Can still be relatively small (must be odd)
+K_OPEN_MEDIUM = 5 # Can still be relatively small (must be odd)
 IT_OPEN_MEDIUM = 1
 K_CLOSE_MEDIUM = 9 # Larger kernel to close bigger gaps (must be odd)
 IT_CLOSE_MEDIUM = 2
@@ -200,7 +200,7 @@ def stepOne(image_path):
     blurred_rotated = cv2.GaussianBlur(input_for_processing, (blur_ksize, blur_ksize), 0)
     intermediate_steps.append(blurred_rotated.copy()); titles.append(f"Blurred Rotated (k={blur_ksize})")
 
-    sobel_ksize = 3
+    sobel_ksize = 9
     grad_x = cv2.Sobel(blurred_rotated, cv2.CV_64F, 1, 0, ksize=sobel_ksize)
     grad_y = cv2.Sobel(blurred_rotated, cv2.CV_64F, 0, 1, ksize=sobel_ksize)
     grad_magnitude = cv2.magnitude(grad_x, grad_y)
@@ -291,7 +291,7 @@ if __name__ == "__main__":
     image_files_to_process = []
     if not os.path.isdir(folder_path): print(f"!! ERROR: Subfolder '{folder_path}' not found."); exit()
     else:
-        valid_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff')
+        valid_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
         try:
             all_files = os.listdir(folder_path)
             image_files_to_process = sorted([ os.path.join(folder_path, f)
