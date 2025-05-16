@@ -180,6 +180,43 @@ def stepOne(image_path):
 
     print("--- Step 1 Finished ---")
     return final_port_mask, intermediate_steps, titles
+# ==============================================
+#       MILESTONE 2: CLASSIFICATION FUNCTIONS
+# ==============================================
+
+def classify_usb(final_mask):
+    """Classifies USB type using geometric features from the mask."""
+    contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return "Unknown (No contours)"
+    
+    contour = max(contours, key=cv2.contourArea)
+    
+    # Feature Extraction
+    rect = cv2.minAreaRect(contour)
+    (_, _), (width, height), _ = rect
+    aspect_ratio = max(width, height) / min(width, height)
+    
+    hull = cv2.convexHull(contour)
+    solidity = cv2.contourArea(contour) / cv2.contourArea(hull)
+    
+    # Classification Rules
+    if 3.0 < aspect_ratio < 4.0 and solidity > 0.9:
+        return "USB-C (Oval)"
+    elif 2.0 < aspect_ratio < 3.0:
+        return "USB-A (Rectangle)"
+    elif 1.0 < aspect_ratio < 2.0:
+        return "Micro-USB (Trapezoid)"
+    else:
+        return f"Unknown (AR={aspect_ratio:.1f})"
+
+def add_classification_result(image, usb_type):
+    """Adds classification text to the image."""
+    result_img = image.copy()
+    cv2.putText(result_img, f"Type: {usb_type}", (10, 30), 
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    return result_img
+
 
 # ==============================================
 #       MAIN EXECUTION (Example Usage)
@@ -228,6 +265,11 @@ if __name__ == "__main__":
     for img_path in image_files_to_process:
         print(f"\n--- Calling stepOne for: {img_path} ---")
         final_mask, steps, step_titles = stepOne(img_path)
+        usb_type = classify_usb(final_mask)
+        print(f"Classification Result: {usb_type}")
+        
+        
+        
 
         display_images(steps, step_titles, f"Step 1 Pipeline: {os.path.basename(img_path)}")
 
