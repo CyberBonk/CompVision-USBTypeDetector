@@ -1,32 +1,30 @@
+import os
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-import os
 import math
 
-# ==============================================
-# TUNING CONSTANTS FOR DYNAMIC MORPHOLOGY
-THIN_EDGE_MAX    = 4
-MEDIUM_EDGE_MAX  = 6
-# thin edges
-K_OPEN_THIN      = 3
-IT_OPEN_THIN     = 1
-K_CLOSE_THIN     = 5
-IT_CLOSE_THIN    = 1
-# medium edges
-K_OPEN_MEDIUM    = 5
-IT_OPEN_MEDIUM   = 1
-K_CLOSE_MEDIUM   = 9
-IT_CLOSE_MEDIUM  = 2
-# thick edges
-K_OPEN_THICK     = 5
-IT_OPEN_THICK    = 1
-K_CLOSE_THICK    = 13
-IT_CLOSE_THICK   = 2
+# -------------------------------------------------------------------
+# CONFIGURATION
+BASE_DIR        = os.path.abspath(os.path.dirname(__file__))
+IMAGES_DIR      = os.path.join(BASE_DIR, "images")
+OUTPUT_DIR      = os.path.join(BASE_DIR, "output_images")
 
+THIN_EDGE_MAX   = 4
+MEDIUM_EDGE_MAX = 6
+MORPH_PARAMS = {
+    "thin":   {"kopen":3,  "iopen":1, "kclose":5,  "iclose":1},
+    "medium": {"kopen":5,  "iopen":1, "kclose":9,  "iclose":2},
+    "thick":  {"kopen":5,  "iopen":1, "kclose":13, "iclose":2},
+}
 
-# ==============================================
-# DISPLAY A GRID OF IMAGES (for debugging)
+# -------------------------------------------------------------------
+def ensure_dirs():
+    if not os.path.isdir(IMAGES_DIR):
+        raise FileNotFoundError(f"Input folder not found: {IMAGES_DIR}")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# -------------------------------------------------------------------
 def display_images(image_list, titles, figure_title="Stages"):
     if not image_list:
         return
@@ -38,8 +36,8 @@ def display_images(image_list, titles, figure_title="Stages"):
     for i, (img, ttl) in enumerate(zip(image_list, titles)):
         plt.subplot(rows, cols, i+1)
         if img is None:
-            plt.imshow(np.zeros((50,50),np.uint8), cmap='gray')
-        elif img.ndim==3:
+            plt.imshow(np.zeros((50,50), np.uint8), cmap='gray')
+        elif img.ndim == 3:
             plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         else:
             plt.imshow(img, cmap='gray')
@@ -48,206 +46,156 @@ def display_images(image_list, titles, figure_title="Stages"):
     plt.tight_layout(rect=[0,0.02,1,0.94])
     plt.show()
 
-
-# ==============================================
-# ROBUST MEDIAN EDGE-THICKNESS ESTIMATE
-def estimate_edge_thickness(binary_edges):
-    if binary_edges is None or cv2.countNonZero(binary_edges)==0:
+# -------------------------------------------------------------------
+def estimate_edge_thickness(edges):
+    if edges is None or cv2.countNonZero(edges)==0:
         return 1
-    try:
-        inv  = cv2.bitwise_not(binary_edges)
-        dist = cv2.distanceTransform(inv, cv2.DIST_L2, 3)
-        vals = dist[binary_edges>0]
-        if vals.size==0:
-            vals = dist[dist>0]
-        if vals.size==0:
-            return 1
-        thickness = (vals*2).astype(int)
-        lo, hi = np.percentile(thickness, [5,95])
-        inliers = thickness[(thickness>=lo)&(thickness<=hi)]
-        med = int(np.median(inliers)) if inliers.size else int(np.median(thickness))
-        return max(1, med)
-    except:
+    inv = cv2.bitwise_not(edges)
+    dist = cv2.distanceTransform(inv, cv2.DIST_L2, 3)
+    vals = dist[edges>0]
+    if vals.size==0:
+        vals = dist[dist>0]
+    if vals.size==0:
         return 1
+    thickness = (vals*2).astype(int)
+    lo, hi = np.percentile(thickness, [5,95])
+    inliers = thickness[(thickness>=lo)&(thickness<=hi)]
+    med = int(np.median(inliers)) if inliers.size else int(np.median(thickness))
+    return max(1, med)
 
+# -------------------------------------------------------------------
+def get_rotation_angle_and_deskew(gray,
+    angle_tol=25, canny1=50, canny2=150,
+    hough_thresh=40, min_len=30, max_gap=10):
+    seq, titles = [], []
+    h, w = gray.shape[:2]
 
-# ==============================================
-# DESKEW VIA CANNY + HOUGH LINES
-def get_rotation_angle_and_deskew(
-    gray_image,
-    angle_tolerance=25,
-    canny_thresh1=50, canny_thresh2=150,
-    hough_thresh=40,
-    min_line_len=40, max_line_gap=10
-):
-    steps, titles = [], []
-    h, w = gray_image.shape[:2]
+    # blur + Canny
+    b3 = cv2.GaussianBlur(gray, (3,3), 0)
+    seq.append(b3.copy()); titles.append("Blur 3×3")
+    e = cv2.Canny(b3, canny1, canny2)
+    seq.append(e.copy()); titles.append(f"Canny {canny1}-{canny2}")
 
-    # 1) small blur → Canny edges
-    blur3 = cv2.GaussianBlur(gray_image, (3,3), 0)
-    steps.append(blur3.copy()); titles.append("Blur for Canny (3×3)")
-    edges = cv2.Canny(blur3, canny_thresh1, canny_thresh2)
-    steps.append(edges.copy()); titles.append(f"Canny Edges ({canny_thresh1}-{canny_thresh2})")
-
-    # 2) HoughLinesP visualization
-    lines = cv2.HoughLinesP(
-        edges,
-        rho=1, theta=np.pi/180,
-        threshold=hough_thresh,
-        minLineLength=min_line_len,
-        maxLineGap=max_line_gap
-    )
-    viz = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
+    # HoughLinesP → collect angles
+    lines = cv2.HoughLinesP(e,1,np.pi/180,hough_thresh,
+                            minLineLength=min_len,maxLineGap=max_gap)
+    viz = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     angles = []
     if lines is not None:
-        for l in lines:
-            x1,y1,x2,y2 = l[0]
-            cv2.line(viz, (x1,y1), (x2,y2), (0,0,255), 1)
-            dx, dy = x2-x1, y2-y1
+        for x1,y1,x2,y2 in lines[:,0,:]:
+            dx,dy = x2-x1, y2-y1
             if dx==0: continue
             ang = math.degrees(math.atan2(dy,dx))
-            if abs(ang)>(180-angle_tolerance):
+            if abs(ang)>(180-angle_tol):
                 ang -= math.copysign(180, ang)
-            if abs(ang)<=angle_tolerance:
+            color = (0,255,0) if abs(ang)<=angle_tol else (0,0,255)
+            cv2.line(viz,(x1,y1),(x2,y2),color,1)
+            if abs(ang)<=angle_tol:
                 angles.append(ang)
-                cv2.line(viz, (x1,y1), (x2,y2), (0,255,0), 1)
-    steps.append(viz.copy()); titles.append("Hough Lines Viz")
+    seq.append(viz.copy()); titles.append("Hough Viz")
 
-    # 3) rotate if enough consistent lines
-    rotated = gray_image.copy()
+    # rotate if needed
+    deskewed = gray.copy()
     if angles:
-        avg_ang = float(np.mean(angles))
-        if abs(avg_ang)>0.5:
-            M = cv2.getRotationMatrix2D((w//2, h//2), avg_ang, 1.0)
-            rotated = cv2.warpAffine(
-                gray_image, M, (w,h),
-                flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_REPLICATE
-            )
+        avg = float(np.mean(angles))
+        if abs(avg)>0.5:
+            M = cv2.getRotationMatrix2D((w//2,h//2), avg, 1.0)
+            deskewed = cv2.warpAffine(gray, M, (w,h),
+                             flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_REPLICATE)
+    seq.append(deskewed.copy()); titles.append("Deskewed")
+    return deskewed, seq, titles
 
-    return rotated, angles, steps, titles
+# -------------------------------------------------------------------
+def detect_and_clean_edges(gray):
+    b5 = cv2.GaussianBlur(gray, (5,5), 0)
+    e5 = cv2.Canny(b5, 40, 100)
+    k3 = cv2.getStructuringElement(cv2.MORPH_RECT,(3,3))
+    thick = cv2.dilate(e5, k3, iterations=1)
 
-
-# ==============================================
-# STEP ONE: FULL PIPELINE (largest CC as final mask)
-def stepOne(image_path):
-    print(f"\n--- Processing: {os.path.basename(image_path)} ---")
-    intermediate_steps = []
-    titles = []
-
-    # 1) load & original
-    img_bgr = cv2.imread(image_path)
-    if img_bgr is None:
-        return None, intermediate_steps, titles
-    intermediate_steps.append(img_bgr.copy()); titles.append("Original")
-
-    # 2) grayscale
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    intermediate_steps.append(gray.copy()); titles.append("Grayscale")
-
-    # 3) deskew
-    gray_rot, angles, ds, dtitles = get_rotation_angle_and_deskew(
-        gray,
-        angle_tolerance=25,
-        canny_thresh1=50, canny_thresh2=150,
-        hough_thresh=40,
-        min_line_len=30, max_line_gap=10
-    )
-    intermediate_steps.extend(ds); titles.extend(dtitles)
-    intermediate_steps.append(gray_rot.copy()); titles.append("Rotated Gray")
-
-    # 4) blur rotated
-    blur5 = cv2.GaussianBlur(gray_rot, (5,5), 0)
-    intermediate_steps.append(blur5.copy()); titles.append("Blurred Rotated (5×5)")
-
-    # 5) Canny edges
-    canny_low, canny_high = 40, 100
-    edges_canny = cv2.Canny(blur5, canny_low, canny_high)
-    intermediate_steps.append(edges_canny.copy())
-    titles.append(f"Canny Edges ({canny_low}-{canny_high})")
-
-    # 6) dilate
-    dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
-    thick_edges = cv2.dilate(edges_canny, dilate_kernel, iterations=1)
-    intermediate_steps.append(thick_edges.copy()); titles.append("Dilated Edges (3×3)")
-
-    # 7) morphological cleanup
-    median_thick = estimate_edge_thickness(thick_edges)
-    print(f" → median edge thickness ≃ {median_thick}")
-    if median_thick<=THIN_EDGE_MAX:
-        ko,io = K_OPEN_THIN, IT_OPEN_THIN
-        kc,ic = K_CLOSE_THIN, IT_CLOSE_THIN
-    elif median_thick<=MEDIUM_EDGE_MAX:
-        ko,io = K_OPEN_MEDIUM, IT_OPEN_MEDIUM
-        kc,ic = K_CLOSE_MEDIUM, IT_CLOSE_MEDIUM
+    med = estimate_edge_thickness(thick)
+    if med<=THIN_EDGE_MAX:
+        p = MORPH_PARAMS["thin"]
+    elif med<=MEDIUM_EDGE_MAX:
+        p = MORPH_PARAMS["medium"]
     else:
-        ko,io = K_OPEN_THICK, IT_OPEN_THICK
-        kc,ic = K_CLOSE_THICK, IT_CLOSE_THICK
+        p = MORPH_PARAMS["thick"]
 
-    opened = cv2.morphologyEx(
-        thick_edges,
-        cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (ko,ko)),
-        iterations=io
-    )
-    intermediate_steps.append(opened.copy()); titles.append(f"Opened (k={ko},i={io})")
+    ko = cv2.getStructuringElement(cv2.MORPH_RECT,(p["kopen"],p["kopen"]))
+    opened = cv2.morphologyEx(thick,cv2.MORPH_OPEN,ko,iterations=p["iopen"])
+    kc = cv2.getStructuringElement(cv2.MORPH_RECT,(p["kclose"],p["kclose"]))
+    cleaned = cv2.morphologyEx(opened,cv2.MORPH_CLOSE,kc,iterations=p["iclose"])
+    return cleaned
 
-    closed = cv2.morphologyEx(
-        opened,
-        cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (kc,kc)),
-        iterations=ic
-    )
-    intermediate_steps.append(closed.copy()); titles.append(f"Closed (k={kc},i={ic})")
+# -------------------------------------------------------------------
+def extract_largest_cc(mask):
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if n<=1:
+        return np.zeros_like(mask)
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    best  = int(np.argmax(areas)) + 1
+    return (labels==best).astype(np.uint8)*255
 
-    # 8) extract largest connected component
-    final_mask = np.zeros_like(closed)
-    n_lbl, labels, stats, _ = cv2.connectedComponentsWithStats(
-        closed, connectivity=8, ltype=cv2.CV_32S
-    )
-    if n_lbl > 1:
-        areas = stats[1:, cv2.CC_STAT_AREA]
-        big   = np.argmax(areas) + 1
-        comp  = (labels == big).astype(np.uint8) * 255
-        final_mask = comp
-        intermediate_steps.append(comp.copy()); titles.append(f"Largest CC ({big})")
-    else:
-        # if only background or 1 label, leave empty mask
-        intermediate_steps.append(final_mask.copy()); titles.append("Largest CC (none)")
+# -------------------------------------------------------------------
+def make_tight_mask(binary_mask):
+    cnts, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    tight = np.zeros_like(binary_mask)
+    if cnts:
+        best = max(cnts, key=lambda c: cv2.contourArea(c))
+        cv2.drawContours(tight, [best], -1, 255, thickness=cv2.FILLED)
+    return tight
 
-    return final_mask, intermediate_steps, titles
+# -------------------------------------------------------------------
+def process_image(path):
+    img = cv2.imread(path)
+    if img is None:
+        print(f"⚠ Could not load: {path}")
+        return None
+    seq, titles = [], []
 
+    seq.append(img.copy()); titles.append("Original BGR")
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    seq.append(gray.copy()); titles.append("Grayscale")
 
-# ==============================================
-# MAIN: Process & Save the largest CC into output_image
+    gray_ds, ds_seq, ds_titles = get_rotation_angle_and_deskew(gray)
+    seq.extend(ds_seq); titles.extend(ds_titles)
+
+    cleaned = detect_and_clean_edges(gray_ds)
+    seq.append(cleaned.copy()); titles.append("Cleaned Mask")
+
+    cc_mask = extract_largest_cc(cleaned)
+    seq.append(cc_mask.copy()); titles.append("Largest CC")
+
+    tight = make_tight_mask(cc_mask)
+    seq.append(tight.copy()); titles.append("Final Mask")
+
+    masked = cv2.bitwise_and(img, img, mask=tight)
+    seq.append(masked.copy()); titles.append("Masked Original")
+
+    return {"name": os.path.splitext(os.path.basename(path))[0],
+            "mask": tight, "masked": masked,
+            "seq": seq, "titles": titles}
+
+# -------------------------------------------------------------------
+def main():
+    ensure_dirs()
+    files = [f for f in sorted(os.listdir(IMAGES_DIR)) if f.lower().endswith((".png",".jpg",".jpeg",".bmp",".webp"))]
+    if not files:
+        print("No images in", IMAGES_DIR)
+        return
+
+    for fn in files:
+        path = os.path.join(IMAGES_DIR, fn)
+        res = process_image(path)
+        if res is None:
+            continue
+        display_images(res["seq"], res["titles"], res["name"])
+        mask_path = os.path.join(OUTPUT_DIR, f"{res['name']}_mask.png")
+        img_path  = os.path.join(OUTPUT_DIR, f"{res['name']}_masked.png")
+        cv2.imwrite(mask_path, res["mask"])
+        cv2.imwrite(img_path,  res["masked"])
+        print(f"→ Saved: mask={mask_path}, masked={img_path}")
+        print("-"*60)
+
 if __name__ == "__main__":
-    base_dir    = os.path.dirname(__file__) if "__file__" in globals() else os.getcwd()
-    images_dir  = os.path.join(base_dir, "Images")
-    output_dir  = os.path.join(base_dir, "output_image")
-    os.makedirs(output_dir, exist_ok=True)
-
-    if not os.path.isdir(images_dir):
-        print(f"ERROR: '{images_dir}' not found.")
-        exit(1)
-
-    valid_exts = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
-    files = sorted([
-        os.path.join(images_dir, f)
-        for f in os.listdir(images_dir)
-        if f.lower().endswith(valid_exts)
-    ])
-    print(f"Found {len(files)} images in '{images_dir}'.")
-
-    for fp in files:
-        mask, seq, seq_titles = stepOne(fp)
-        display_images(seq, seq_titles, f"Step 1: {os.path.basename(fp)}")
-
-        if mask is not None:
-            # save the largest CC mask
-            name, _  = os.path.splitext(os.path.basename(fp))
-            out_name = f"{name}_largestCC.png"
-            out_path = os.path.join(output_dir, out_name)
-            cv2.imwrite(out_path, mask)
-            print(f" → Saved largest CC mask to: {out_path}")
-
-        print("-" * 60)
+    main()
